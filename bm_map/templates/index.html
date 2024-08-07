@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Пользовательский слой Leaflet</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+    <link rel="stylesheet" href="https://code.jquery.com/ui/1.12.1/themes/base/jquery-ui.css">
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script src="https://code.jquery.com/ui/1.12.1/jquery-ui.min.js"></script>
+    <style>
+        #map { height: 800px; }
+        .legend {
+            line-height: 18px;
+            color: #555;
+        }
+        .legend img {
+            max-width: 50px;
+            max-height: 30px;
+        }
+        .caret {
+            cursor: pointer;
+            user-select: none;
+        }
+
+        .caret::before {
+            content: "\25B6";
+            color: black;
+            display: inline-block;
+            margin-right: 6px;
+        }
+
+        .caret-down::before {
+            transform: rotate(90deg);
+        }
+
+        .nested {
+            display: none;
+        }
+
+        .active {
+            display: block;
+        }
+
+        #tree-view {
+            margin-top: 20px;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+        }
+        #search-box {
+            margin-top: 10px;
+            width: 300px;
+        }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+    <button id="prev-floor">Предыдущий этаж</button>
+    <button id="next-floor">Следующий этаж</button>
+    <input type="text" id="search-box" placeholder="Поиск полигонов...">
+    <div id="tree-view">
+        <ul id="floor-list">
+            {% for floor in floors %}
+                <li>
+                    <span class="caret">Этаж {{ floor.number }}</span>
+                    <ul class="nested">
+                        {% for polygon in floor.polygons.all %}
+                            <li>
+                                <span class="caret">{{ polygon.short_description }}</span>
+                                <ul class="nested" id="description-list-{{ polygon.id }}">
+                                    <!-- элементы description -->
+                                </ul>
+                            </li>
+                        {% endfor %}
+                    </ul>
+                </li>
+            {% endfor %}
+        </ul>
+    </div>
+    <script>
+        // Инициализация карты
+        var southWest = L.latLng(55.761147, 37.675767);
+        var northEast = L.latLng(55.770116, 37.694542);
+        var bounds = L.latLngBounds(southWest, northEast);
+        const buildingCoords = [55.765927, 37.684929];
+
+        var map = L.map('map', {
+            maxBounds: bounds,
+            maxBoundsViscosity: 1.0,
+            minZoom: 18,
+            maxZoom: 21,
+        }).setView(buildingCoords, 18);
+
+        L.tileLayer('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAQAAAAEAAQMAAABmvDolAAAAA1BMVEX///+nxBvIAAAAH0lEQVQYGe3BAQ0AAADCIPunNsc3YAAAAAAAAAAAAHwDcqdZAAAB70lEQVR4XnXQMW5kMQxE0Z+SlOUl5LLk0lLSCjnr5jFo+28wgHkPJKp4ATeSWOK/+68UZyxEkjN1Zkb6MDN1ZiyZJBdmJqllJrkVSTIzkuTCJLkwSS5MkguT5MIkuTBJLkySC5PkwiS5MEkuTJILk+TCJPnA5Gg/YXe8h93xEnbHW9gdb2H3Pnl8h935Enbnc9i9L2F3Pjjew+7+H9uVvTnuw+68D7vzPuzOu7A7b8LuQ9g95c0dL2H3fgu7HNr7JezO+7A7H8LuBYe2f/gL2/+CXeHW9g9/Ybsf2O4HtvuB7X5gux/Y7ge2+4HtfmC7H9juB7b7ge1+YLsf2O4HtvuB7X5gux/Y7v0UdojTH/7C9tnuB7b7ge1+YLsf2O4HtvuB7X5gux/Y7ge2+4HtfmC7H9juB7b7ge1+YLsf2O4HtvuB7X5g+75kO7Q3x1vYvZ/C7vkSdu/nsHs+h937IezOx7B7P4Xd+RB2OTj+wvYp7P4HoLEMpgjCScoAAAAASUVORK5CYII=', {
+            attribution: ''
+        }).addTo(map);
+
+        let currentFloor = {{ initial_floor }};
+        const totalFloors = {{ total_floors }};
+        let currentFloorLayer;
+
+        // Слой для полигонов текущего этажа
+        let polygonLayers = [];
+
+        function updateDescriptionList(polygonId, description) {
+            const descriptionList = document.getElementById(`description-list-${polygonId}`);
+            if (descriptionList) {
+                descriptionList.innerHTML = ''; // Очищаем существующий список
+                const items = description.split(',').map(item => item.trim());
+                items.forEach(item => {
+                    if (item) {
+                        const li = document.createElement('li');
+                        li.textContent = item;
+                        descriptionList.appendChild(li);
+                    }
+                });
+            }
+        }
+
+        // Функция для изменения прозрачности полигона
+        function highlightPolygon(polygonId) {
+            polygonLayers.forEach(layer => {
+                if (layer.polygonId === polygonId) {
+                    layer.setStyle({fillOpacity: 0.3});
+                } else {
+                    layer.setStyle({fillOpacity: 0.1});
+                }
+            });
+        }
+
+        // Инициализация автозаполнения
+        $("#search-box").autocomplete({
+            source: function(request, response) {
+                console.log("Sending request with term:", request.term);
+                $.getJSON("/search_polygons/", {
+                    q: request.term
+                }, function(data) {
+                    console.log("Received data:", data);
+                    response(data.map(function(item) {
+                        return {
+                            label: item.text,
+                            value: item.text,
+                            id: item.id,
+                            floor: item.floor
+                        };
+                    }));
+                }).fail(function(jqXHR, textStatus, errorThrown) {
+                    console.error("AJAX request failed:", textStatus, errorThrown);
+                });
+            },
+            minLength: 2,
+            select: function(event, ui) {
+                console.log("Selected item:", ui.item);
+                currentFloor = ui.item.floor;
+                loadPolygons(currentFloor).then(() => {
+                    highlightPolygon(ui.item.id);
+                });
+            }
+        });
+
+        async function loadPolygons(floor) {
+            // Удаляем полигоны текущего этажа
+            polygonLayers.forEach(layer => map.removeLayer(layer));
+            polygonLayers = [];
+
+            const response = await fetch(`/get_polygons/${floor}/`);
+            if (!response.ok) {
+                console.error('Ошибка при загрузке данных этажа');
+                return;
+            }
+            const data = await response.json();
+
+            // Удаляем текущий ImageOverlay, если существует
+            if (currentFloorLayer) {
+                map.removeLayer(currentFloorLayer);
+            }
+
+            // Добавляем новый ImageOverlay
+            const bounds = [
+                [55.764925, 37.682805],
+                [55.766917, 37.68714]
+            ];
+            currentFloorLayer = L.imageOverlay(`/media/fk/${data.svg_path}`, bounds, {
+                opacity: 1
+            }).addTo(map);
+
+            // Добавляем полигоны
+            data.polygons.forEach(polygon => {
+                const coordinates = JSON.parse(polygon.coordinates);
+                const layer = L.polygon(coordinates, {
+                    color: 'black',
+                    weight: 1,
+                    fillColor: 'blue',
+                    fillOpacity: 0.1
+                }).bindPopup(polygon.short_description);
+
+                // Добавляем обработчики событий для изменения прозрачности
+                layer.on('click', function() {
+                    // Сначала возвращаем все полигоны к прозрачности 0.1
+                    polygonLayers.forEach(l => l.setStyle({fillOpacity: 0.1}));
+                    // Затем устанавливаем прозрачность 1 для выбранного полигона
+                    this.setStyle({fillOpacity: 0.3});
+                });
+
+                layer.polygonId = polygon.id;
+
+                layer.addTo(map);
+                polygonLayers.push(layer);
+            });
+
+            // Обновляем древовидный список
+            data.polygons.forEach(polygon => {
+                updateDescriptionList(polygon.id, polygon.description);
+            });
+
+            // Добавляем обработчик клика по карте для сброса прозрачности
+            map.on('click', function(e) {
+                if (!polygonLayers.some(layer => layer.getBounds().contains(e.latlng))) {
+                    polygonLayers.forEach(layer => layer.setStyle({fillOpacity: 0.1}));
+                }
+            });
+        }
+
+        // Подгружаем полигоны для начального этажа
+        loadPolygons(currentFloor);
+
+        // Обработчики для кнопок смены этажей
+        const prevFloorButton = document.getElementById('prev-floor');
+        const nextFloorButton = document.getElementById('next-floor');
+
+        prevFloorButton.addEventListener('click', () => {
+            currentFloor = (currentFloor - 1 + totalFloors) % totalFloors || totalFloors;
+            loadPolygons(currentFloor);
+        });
+
+        nextFloorButton.addEventListener('click', () => {
+            currentFloor = (currentFloor % totalFloors) + 1;
+            loadPolygons(currentFloor);
+        });
+
+    </script>
+    <script>
+        var toggler = document.getElementsByClassName("caret");
+        var i;
+    
+        for (i = 0; i < toggler.length; i++) {
+            toggler[i].addEventListener("click", function() {
+                this.parentElement.querySelector(".nested").classList.toggle("active");
+                this.classList.toggle("caret-down");
+            });
+        }
+    </script>
+</body>
+</html>
